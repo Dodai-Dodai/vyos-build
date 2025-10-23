@@ -14,16 +14,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Free disk space (optional)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-
       - name: Write flavor for Proxmox + cloud-init
         run: |
           mkdir -p data/build-flavors
@@ -68,7 +58,7 @@ jobs:
         with:
           name: vyos-1.5-pve-cloudinit
           path: dist/
-          retention-days: 7
+          retention-days: 1
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
