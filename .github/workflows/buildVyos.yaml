@@ -1,31 +1,48 @@
-name: build-vyos-pve-qcow2
+name: build-vyos-qcow2
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tag name or version to use for the release (e.g., 1.5.0)'
+        required: false
+      publish_release:
+        description: 'Publish artifacts to GitHub Releases (set to false for dry runs)'
+        required: false
+        default: 'true'
+      skip_build:
+        description: 'Skip the heavy VyOS build (for validation/testing only)'
+        required: false
+        default: 'false'
+  push:
+    tags:
+      - 'v*'
   schedule:
-    - cron: "0 0 * * 1"
+    - cron: '0 0 * * 1'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 240
-
+    env:
+      FLAVOR_NAME: pve-cloudinit
+      FLAVOR_FILE: data/build-flavors/pve-cloudinit.toml
+      SKIP_BUILD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_build == 'true' }}
+    outputs:
+      has_artifact: ${{ steps.artifact_status.outputs.has_artifact }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Write flavor for Proxmox + cloud-init
         run: |
-          mkdir -p data/build-flavors
-          cat > data/build-flavors/pve-cloudinit.toml <<'TOML'
+          mkdir -p "$(dirname "${FLAVOR_FILE}")"
+          cat > "${FLAVOR_FILE}" <<'TOML'
           image_format = "qcow2"
           packages = ["cloud-init", "qemu-guest-agent"]
           default_config = '''
-          system { host-name vyos; console { device ttyS0 { speed 115200 } }
-            login { user vyos { authentication {
-              encrypted-password $6$QxPS.uk6mfo$9QBSo8u1FkH16gMyAVhus6fU3LOzvLR9Z9.82m3tiHFAxTtIkhaZSWssSgzt4v4dGAL8rhVQxTg0oAG9/q11h/
-              plaintext-password ""
-            } } } }
+          system { host-name vyos; console { device ttyS0 { speed 115200 } } login { user vyos { authentication {
+            encrypted-password $6$QxPS.uk6mfo$9QBSo8u1FkH16gMyAVhus6fU3LOzvLR9Z9.82m3tiHFAxTtIkhaZSWssSgzt4v4dGAL8rhVQxTg0oAG9/q11h/ ; plaintext-password "" } } } }
           interfaces { loopback lo {} }'''
           [[includes_chroot]]
           path = "etc/cloud/cloud.cfg.d/90_datasource.cfg"
@@ -37,41 +54,80 @@ jobs:
           console_speed = 115200
           TOML
 
-      - name: Build with vyos/vyos-build (privileged)
+      - name: Build VyOS qcow2 image
+        if: env.SKIP_BUILD != 'true'
         run: |
           sudo docker run --rm --privileged \
             -v "$PWD":/vyos -v /dev:/dev -w /vyos \
-            vyos/vyos-build:current bash -lc '
+            vyos/vyos-build:current bash -lc "
               set -euo pipefail
-              ./build-vyos-image pve-cloudinit
-            '
+              ./build-vyos-image ${FLAVOR_NAME}
+            "
 
-      - name: Collect artifacts
+      - name: Collect qcow2 artifact
+        if: env.SKIP_BUILD != 'true'
         run: |
           mkdir -p dist
-          cp build/vyos-1.5-*-pve-cloudinit-amd64.qcow2 dist/ || true
-          cp build/vyos-1.5-*-pve-cloudinit-amd64.iso dist/ || true
+          shopt -s nullglob
+          for image in build/vyos-*-${FLAVOR_NAME}-amd64.qcow2; do
+            cp "$image" dist/
+          done
           ls -lh dist || true
 
-      - name: Upload artifacts (7 days)
+      - name: Ensure dist directory exists
+        run: mkdir -p dist
+
+      - name: Determine artifact availability
+        id: artifact_status
+        run: |
+          if compgen -G "dist/*.qcow2" > /dev/null; then
+            echo "has_artifact=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_artifact=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload qcow2 artifact (24h retention)
+        if: steps.artifact_status.outputs.has_artifact == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: vyos-1.5-pve-cloudinit
-          path: dist/
+          name: vyos-qcow2-${{ env.FLAVOR_NAME }}
+          path: dist/*.qcow2
           retention-days: 1
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
+    if: ${{ needs.build.outputs.has_artifact == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release != 'false')) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download qcow2 artifact
+        uses: actions/download-artifact@v4
         with:
-          name: vyos-1.5-pve-cloudinit
+          name: vyos-qcow2-pve-cloudinit
           path: dist
+
+      - name: Resolve release metadata
+        id: release_meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -z "$INPUT_VERSION" ]; then
+              echo "::error::workflow_dispatch runs that publish a release must provide the 'version' input" >&2
+              exit 1
+            fi
+            echo "tag=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
+            echo "release_name=VyOS $INPUT_VERSION (qcow2)" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "release_name=VyOS $GITHUB_REF_NAME (qcow2)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*.qcow2
-            dist/*.iso
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: ${{ steps.release_meta.outputs.release_name }}
+          files: dist/*.qcow2
+          generate_release_notes: true
+          make_latest: true
