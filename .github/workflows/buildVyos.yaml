@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 240
     env:
       FLAVOR_NAME: pve-cloudinit
+      VYOS_SOURCE_DIR: vyos-build-src
       FLAVOR_FILE: data/build-flavors/pve-cloudinit.toml
       SKIP_BUILD: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.skip_build == 'true' }}
     outputs:
@@ -34,10 +35,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Clone upstream vyos-build sources
+        run: |
+          git clone --depth 1 https://github.com/vyos/vyos-build "${VYOS_SOURCE_DIR}"
+
       - name: Write flavor for Proxmox + cloud-init
         run: |
-          mkdir -p "$(dirname "${FLAVOR_FILE}")"
-          cat > "${FLAVOR_FILE}" <<'TOML'
+          mkdir -p "${VYOS_SOURCE_DIR}/$(dirname "${FLAVOR_FILE}")"
+          cat > "${VYOS_SOURCE_DIR}/${FLAVOR_FILE}" <<'TOML'
           image_format = "qcow2"
           packages = ["cloud-init", "qemu-guest-agent"]
           default_config = '''
@@ -58,7 +63,7 @@ jobs:
         if: env.SKIP_BUILD != 'true'
         run: |
           sudo docker run --rm --privileged \
-            -v "$PWD":/vyos -v /dev:/dev -w /vyos \
+            -v "$PWD":/vyos -v /dev:/dev -w /vyos/${VYOS_SOURCE_DIR} \
             vyos/vyos-build:current bash -lc "
               set -euo pipefail
               ./build-vyos-image ${FLAVOR_NAME}
@@ -69,7 +74,7 @@ jobs:
         run: |
           mkdir -p dist
           shopt -s nullglob
-          for image in build/vyos-*-${FLAVOR_NAME}-amd64.qcow2; do
+          for image in ${VYOS_SOURCE_DIR}/build/vyos-*-${FLAVOR_NAME}-amd64.qcow2; do
             cp "$image" dist/
           done
           ls -lh dist || true
