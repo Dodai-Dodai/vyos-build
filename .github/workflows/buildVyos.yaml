@@ -103,6 +103,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: ${{ needs.build.outputs.has_artifact == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release != 'false')) }}
+    env:
+      FLAVOR_NAME: pve-cloudinit
     steps:
       - name: Download qcow2 artifact
         uses: actions/download-artifact@v4
@@ -110,19 +112,45 @@ jobs:
           name: vyos-qcow2-pve-cloudinit
           path: dist
 
+      - name: Extract image version from artifact name
+        id: image_meta
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.qcow2)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No qcow2 artifacts found in dist/" >&2
+            exit 1
+          fi
+
+          image="${files[0]}"
+          image_base="$(basename "$image")"
+          version="${image_base#vyos-}"
+          version="${version%-${FLAVOR_NAME}-amd64.qcow2}"
+
+          if [ -z "$version" ] || [ "$version" = "$image_base" ]; then
+            echo "::error::Unable to derive version from artifact name '$image_base'" >&2
+            exit 1
+          fi
+
+          echo "image_name=$image_base" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Resolve release metadata
         id: release_meta
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
+          DERIVED_VERSION: ${{ steps.image_meta.outputs.version }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ -z "$INPUT_VERSION" ]; then
-              echo "::error::workflow_dispatch runs that publish a release must provide the 'version' input" >&2
+            version="${INPUT_VERSION:-$DERIVED_VERSION}"
+            if [ -z "$version" ]; then
+              echo "::error::Unable to resolve version for release metadata" >&2
               exit 1
             fi
-            echo "tag=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
-            echo "release_name=VyOS $INPUT_VERSION (qcow2)" >> "$GITHUB_OUTPUT"
+            echo "tag=$version" >> "$GITHUB_OUTPUT"
+            echo "release_name=VyOS $version (qcow2)" >> "$GITHUB_OUTPUT"
           else
             echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
             echo "release_name=VyOS $GITHUB_REF_NAME (qcow2)" >> "$GITHUB_OUTPUT"
